@@ -1,13 +1,7 @@
-import os, sys
-sys.path.append(os.path.abspath(os.path.join('../..')))
-sys.path.append('c:\\Users\\Chen\\Documents\\Projects\\FlowParamEstim\\BayesFlow-master')
-
-import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-import pandas as pd
-
+import numpy as np
 from numba import njit
+
 
 class DDM():
 
@@ -293,10 +287,10 @@ def Simulator_combine2cong(
     return i, x # (n_prior, 2*N, 2)
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.distributions.laplace import Laplace
 from torch.distributions.normal import Normal
 from torch.distributions.studentT import StudentT
-from torch.distributions.laplace import Laplace
+from torch.utils.data import DataLoader, Dataset
 
 
 class SSP_DDM_Dataset(Dataset):
