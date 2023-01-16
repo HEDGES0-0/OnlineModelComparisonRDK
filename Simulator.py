@@ -1,6 +1,6 @@
-import matplotlib.pyplot as plt
 import numpy as np
 from numba import njit
+from scipy.stats import truncnorm
 
 
 class DDM():
@@ -75,6 +75,7 @@ class DDM():
 
 
 class SSP():
+    
     @staticmethod
     def prior(batch_size):
         """
@@ -95,11 +96,20 @@ class SSP():
         # p ~ U(0, 10)
         # rd ~ U(0, 10)
         # nl ~ U(0, 1), standard deviation of noise
-        # sdA ~ U(0, 5)
+        # sdA ~ U(1, 5)
 
         # default distribution A ~ U(0, 2.4), ter ~ U(0, 0.95), p ~ U(0, 2.25), rd ~ U(0,1)
-        p_samples = np.random.uniform(low=(0.0, 0.0, 0, 0), 
-                                    high=(2.4, 0.95, 2.25, 1), size=(batch_size, 4))
+        # p_samples = np.random.uniform(low=(0.0, 0.0, 0, 0.5), 
+        #                             high=(2.4, 0.95, 2.25, 1.5), size=(batch_size, 4))
+        
+        # prior distribution provide by Jordan Deakin. 
+        # truncated normal, truncnorn.rvs(a, b, /mu, /sigma2) 
+        # notice the scipy atrrubution:
+        # (a, b = (myclip_a - loc) / scale, (myclip_b - loc) / scale)
+        mu = np.array([.2, .4, .5, 70, 4])
+        sigma = np.array([.2, .4, .5, 30, 4])
+        a = (0 - mu) / sigma
+        p_samples = truncnorm.rvs(a, np.inf, mu, sigma, size=(batch_size, 5))
         return p_samples.astype(np.float32)
         
     @staticmethod
@@ -126,7 +136,7 @@ class SSP():
 
     @staticmethod
     # @njit
-    def SSP_diffusion_trial(A, ter, p, rd, nl, sdA, incongruency, dt, max_steps):
+    def SSP_diffusion_trial(A, ter, p, rd, sdA, nl, incongruency, dt, max_steps):
         """Simulates a trial from the diffusion model."""
 
         n_steps = 0.
@@ -166,12 +176,12 @@ class SSP():
     # @njit
     def diffusion_condition(n_trials, params, incongruency, dt=0.005, max_steps=3e3):
         """Simulates a diffusion process over an entire condition."""
-        A, ter, p, rd = params
+        A, ter, p, rd, sdA = params
         nl = 1
-        sdA = 1.2
+        # sdA = 1.2
         x = np.empty((n_trials, 2), dtype=np.float32)
         for i in range(n_trials):
-            x[i] = SSP.SSP_diffusion_trial(A, ter, p, rd, nl, sdA, incongruency, dt, max_steps)
+            x[i] = SSP.SSP_diffusion_trial(A, ter, p, rd, sdA, nl, incongruency[i], dt, max_steps)
         return x
 
     @staticmethod
@@ -187,17 +197,133 @@ class SSP():
 
         # in 
         if incongruency == False:
-            incongruency = np.zeros(n_sim, dtype=np.float32)
+            incongruency = np.zeros((n_sim, n_obs), dtype=np.float32)
         elif incongruency == True:
-            incongruency = np.ones(n_sim, dtype=np.float32)
+            incongruency = np.ones((n_sim, n_obs), dtype=np.float32)
         else:
-            incongruency = np.random.choice([0, 1], n_sim).astype(np.float32)
+            incongruency = np.random.choice([0, 1], (n_sim, n_obs)).astype(np.float32)
 
         # Simulate diffusion data
         for i in range(n_sim):
             sim_data[i] = SSP.diffusion_condition(n_obs, prior_samples[i], incongruency[i], dt=dt, max_steps=max_iter)
         
         return sim_data.astype(np.float32)
+
+
+class DSTP():
+
+    @staticmethod
+    def prior(batch_size):
+        """
+        Samples from the prior 'batch_size' times.
+        ----------
+        
+        Arguments:
+        batch_size : int -- the number of samples to draw from the prior
+        ----------
+        
+        Output:
+        theta : np.ndarray of shape (batch_size, theta_dim) -- the samples batch of parameters
+        """
+        
+        # Prior ranges for the simulator 
+        # A ~ U(0, 2.4)
+        # C ~ U(0, 2,4)
+        # ter ~ U(0, 0.95)
+        # \mu_{ta} ~ U(0, 1.125)
+        # \mu_{fl} ~ U(0, 1.125)
+        # \mu_{ss} ~ U(0, 2.25)
+        # \mu_{rs2} ~ U(\mu_{ta} + \mu_{fl}, 2.25)
+        # nl ~ Constant(1), standard deviation of noise
+
+        # p_samples = np.random.uniform(low=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0), 
+        #                             high=(2.4, 2.4, 0.95, 1.125, 1.125, 2.25), size=(batch_size, 6))
+        # # low = p_samples[:,3:5].sum(axis=-1, keepdims=True)
+        # low = 0
+        # high = 2.25
+        # mu_rs2 = np.random.random_sample(size=(batch_size, 1)) * (high - low) + low
+        # p_samples = np.concatenate([p_samples, mu_rs2], axis=-1)
+
+        mu = np.array([.2, .2, .4, .2, .4, 1.2, .4])
+        sigma = np.array([.2, .2, .3, .2, .4, 1.2, .4])
+        a = (0 - mu) / sigma
+        p_samples = truncnorm.rvs(a, np.inf, mu, sigma, size=(batch_size, 7))
+        return p_samples.astype(np.float32)
+        
+    @staticmethod
+    # @njit
+    def DSTP_diffusion_trial(A, C, ter, mu_ta, mu_fl, mu_ss, mu_rs2, nl, incongruency, dt, max_steps):
+        """Simulates a trial from the diffusion model."""
+
+        n_steps = 0.
+        rs = 0 # response selection
+        ss = 0 # stimulus selection
+        stage = 1 # 1 or 2
+
+        if incongruency == 1:
+            mu = mu_ta - mu_fl
+        else:
+            mu = mu_ta + mu_fl
+
+        # Simulate a single DM path
+        while (rs > -A and rs < A and n_steps < max_steps):
+
+            if stage == 1:
+            
+                # DDM equation
+                rs += mu*dt + nl * np.sqrt(dt) * np.random.normal() # Phase 1
+                ss += mu_ss*dt + nl * np.sqrt(dt) * np.random.normal() # Phase 2
+
+                if ss < -C or ss > C:
+                    stage = 2
+                    mu = mu_rs2 if ss > C else -mu_rs2
+
+            if stage == 2:
+                # DDM equation
+                rs += mu*dt + nl * np.sqrt(dt) * np.random.normal() # Phase 1
+
+            # Increment step
+            n_steps += 1.0
+
+        rt = n_steps * dt
+        return rt + ter if rs > 0. else -rt - ter, incongruency
+
+    @staticmethod
+    # @njit
+    def diffusion_condition(n_trials, params, incongruency, dt=0.005, max_steps=3e3):
+        """Simulates a diffusion process over an entire condition."""
+        A, C, ter, mu_ta, mu_fl, mu_ss, mu_rs2 = params
+        nl = 1
+        x = np.empty((n_trials, 2), dtype=np.float32)
+        for i in range(n_trials):
+            x[i] = DSTP.DSTP_diffusion_trial(
+                A, C, ter, mu_ta, mu_fl, mu_ss, mu_rs2, nl, incongruency[i], dt, max_steps)
+        return x
+
+    @staticmethod
+    def batch_simulator(prior_samples, n_obs, incongruency='random', dt=0.005, max_iter=3e3, **kwargs):
+        """
+        Simulate multiple diffusion_model_datasets.
+        input:
+        :in: 'random', 0 (inin), 1 (in)
+        """
+        
+        n_sim = prior_samples.shape[0]
+        sim_data = np.empty((n_sim, n_obs, 2), dtype=np.float32)
+
+        # in 
+        if incongruency == False:
+            incongruency = np.zeros((n_sim, n_obs), dtype=np.float32)
+        elif incongruency == True:
+            incongruency = np.ones((n_sim, n_obs), dtype=np.float32)
+        else:
+            incongruency = np.random.choice([0, 1], (n_sim, n_obs)).astype(np.float32)
+
+        # Simulate diffusion data
+        for i in range(n_sim):
+            sim_data[i] = DSTP.diffusion_condition(n_obs, prior_samples[i], incongruency[i], dt=dt, max_steps=max_iter)
+        
+        return sim_data.astype(np.float32) # (n_prior, n_obs, n_feature)
 
 
 def param_padding(params, max_param_length=3):
@@ -213,8 +339,8 @@ def param_padding(params, max_param_length=3):
 def Simulator(
     n_prior=1, n_obs='random', 
     models=[
-        {'name': DDM, 'kwargs': {}}, 
-        {'name': SSP, 'kwargs': {}}
+        {'name': SSP, 'kwargs': {}}, 
+        {'name': DSTP, 'kwargs': {}}
         ]
     ):
     """
@@ -240,51 +366,8 @@ def Simulator(
     params = model['name'].prior(n_prior)
     x = model['name'].batch_simulator(params, n_obs, **model['kwargs'])
 
-    return i, param_padding(params, max_param_length=4), x
+    return i, param_padding(params, max_param_length=7), x
 
-def Simulator_combine2cong(
-    n_prior=1, n_obs='random', 
-    models=[
-        {'name': DDM, 'kwargs': {}}, 
-        {'name': SSP, 'kwargs': {}}
-        ]
-    ):
-    """x with [x1, x2], x1 is incongruent trials and x2 is congruent trials.
-    priors: list of prior simulator.
-    n_obs: number of observations x_i.
-    models: list of model prior distribution.
-
-    return: 
-        i: model index
-        params: (n_prior, n_obs)
-        x: (n_prior, n_obs, n_feature)
-    """
-    n_model = len(models)
-    
-    if n_obs == 'random':
-        n_obs = np.random.randint(5,100)
-    if callable(n_obs):
-        n_obs = n_obs()
-
-    i = np.random.randint(n_model)
-    model = models[i]
-
-    # incongruency
-    params1 = model['name'].prior(n_prior) # (n_prior, n_params)
-    # (n_prior, N, 2)
-    x1 = model['name'].batch_simulator(params, n_obs, incongruency=True)
-
-    # congruency
-    params2 = model['name'].prior(n_prior)
-    # (n_prior, N, 2)
-    x2 = model['name'].batch_simulator(params, n_obs, incongruency=False)
-
-    params = np.concatenate((params1))
-    x = np.concatenate((x1, x2), axis=1) # (n_prior, 2*N, 2)
-    ifincong = np.concatenate((np.ones((n_prior, n_obs)), np.zeros((n_prior, n_obs))), axis=1) # (n_prior, 2*N)
-    x[:,:,1] = ifincong
-
-    return i, x # (n_prior, 2*N, 2)
 
 import torch
 from torch.distributions.laplace import Laplace
@@ -310,7 +393,8 @@ class SSP_DDM_Dataset(Dataset):
     def __getitem__(self, index):
         i, params, x = Simulator(n_obs=self.n_obs, models=self.models) # scalar, (1, n_obs), (1, n_obs, n_feature)
         # x[:,:,1] = (x[:,:,0] > 0).astype(np.float32) # (pos and neg means acc)
-        x = torch.from_numpy(x[0,:,0]).unsqueeze(dim=-1) # (n_obs, 1)
+        # x = torch.from_numpy(x[0,:,0]).unsqueeze(dim=-1) # (n_obs, 1)
+        x = torch.from_numpy(x[0]) # (n_obs, 2)
         return torch.eye(len(self.models))[i], \
             torch.from_numpy(params[0]), \
             x # (n_obs, *)
@@ -318,29 +402,6 @@ class SSP_DDM_Dataset(Dataset):
     def __len__(self):
         return self.length
 
-class SSP_DDM_Dataset_combine2cong(Dataset):
-
-    def __init__(
-        self, n_obs='random', length=10000, 
-        models=[
-        {'name': DDM, 'kwargs': {}}, 
-        {'name': SSP, 'kwargs': {}}
-        ]
-        ):
-        super().__init__()
-        self.n_obs = n_obs
-        self.length = length
-        self.models = models
-
-    def __getitem__(self, index):
-        i, params, x = Simulator(n_obs=self.n_obs, models=self.models) # scalar, (1, n_obs), (1, n_obs, n_feature)
-        return torch.eye(len(self.models))[i], \
-            torch.from_numpy(params[0]), \
-            x # (n_obs, 2)
-
-    def __len__(self):
-        return self.length
-    
 
 class DistributionDataset(Dataset):
     # 1: Normal, loc ~ U(-10,10), scale(0,10)
@@ -412,6 +473,8 @@ class DistributionDataset(Dataset):
 
 
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+
     # dataset = DistributionDataset()
     # m, p, x = dataset[0]    
     # dataloader = DataLoader(dataset, batch_size=10)
@@ -420,33 +483,44 @@ if __name__ == "__main__":
     #     break
 
     # =================================================
-    params1, data1 = DistributionDataset.sample_Laplace(n_obs=1000)
-    params2, data2 = DistributionDataset.sample_Normal(n_obs=1000)
-    params3, data3 = DistributionDataset.sample_StudentT(n_obs=1000)
-    import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(1,3,figsize=(12,5))
-    axes[0].hist(data1[0], bins=30)
-    axes[0].set_title(f'mu = {params1[0,0]: 0.4f}, \nscale = {params1[0,1]: 0.4f}')
+    # params1, data1 = DistributionDataset.sample_Laplace(n_obs=1000)
+    # params2, data2 = DistributionDataset.sample_Normal(n_obs=1000)
+    # params3, data3 = DistributionDataset.sample_StudentT(n_obs=1000)
+    # import matplotlib.pyplot as plt
+    # fig, axes = plt.subplots(1,3,figsize=(12,5))
+    # axes[0].hist(data1[0], bins=30)
+    # axes[0].set_title(f'mu = {params1[0,0]: 0.4f}, \nscale = {params1[0,1]: 0.4f}')
 
-    axes[1].hist(data2[0], bins=30)
-    axes[1].set_title(f'mu = {params2[0,0]: 0.4f}, \nscale = {params2[0,1]: 0.4f}')
+    # axes[1].hist(data2[0], bins=30)
+    # axes[1].set_title(f'mu = {params2[0,0]: 0.4f}, \nscale = {params2[0,1]: 0.4f}')
     
-    axes[2].hist(data3[0], bins=30)
-    axes[2].set_title(f'mu = {params3[0,0]: 0.4f}, \nscale = {params3[0,1]: 0.4f}, \n df = {params3[0,2]: 0.4f}')
-    plt.show()
+    # axes[2].hist(data3[0], bins=30)
+    # axes[2].set_title(f'mu = {params3[0,0]: 0.4f}, \nscale = {params3[0,1]: 0.4f}, \n df = {params3[0,2]: 0.4f}')
+    # plt.show()
 
 
     # =================================================
-    # i, params, x = Simulator()
-    i, params, x = Simulator(n_obs=1000)
-    fig, axes = plt.subplots(1,1)
-    axes.hist(x.reshape(-1), bins=30)
-    plt.show()
+    models=[
+        {'name': SSP, 'kwargs': {'incongruency': 'random'}}, 
+    ]
+    i, params, x = Simulator(n_prior=100, n_obs=20, models=models)
+    x_cong = x[x[:,:,1]==0,0]
+    x_incong = x[x[:,:,1]==1,0]
+    x_cong_cor = x_cong[x_cong>0]
+    x_cong_incor = x_cong[x_cong<0]
+    x_incong_cor = x_incong[x_incong>0]
+    x_incong_incor = x_incong[x_incong<0]
+    print(
+        len(x_cong_cor), 
+        len(x_cong_incor), 
+        len(x_incong_cor), 
+        len(x_incong_incor)
+    )
+    print(
+        x_cong_cor.mean(), 
+        x_cong_incor.mean(), 
+        x_incong_cor.mean(), 
+        x_incong_incor.mean()
+    )
 
 
-    i, x = Simulator_combine2cong(n_obs=1000)
-    fig, axes = plt.subplots(1,1)
-    axes.hist(x[x[:,:,1]==1].reshape(-1), bins=30, alpha=0.5, label='incong')
-    axes.hist(x[x[:,:,1]==0].reshape(-1), bins=30, alpha=0.5, label='cong')
-    plt.legend()
-    plt.show()
